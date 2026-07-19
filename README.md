@@ -124,9 +124,16 @@ DATABASE_URL=postgresql+psycopg2://postgres:password@localhost:5432/foresight
 SECRET_KEY=foresight-dev-secret-key-change-in-production
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=60
+CORS_ORIGINS=http://localhost:5173,http://localhost
+VITE_API_BASE_URL=http://localhost:8000
 ```
 
 > **Note:** When running with Docker Compose, `DATABASE_URL` must use `db` as the hostname, not `localhost`. The `.env` file shipped with this project already has the correct value for Docker.
+
+`CORS_ORIGINS` and `VITE_API_BASE_URL` are read by two different things from this same file:
+`CORS_ORIGINS` is loaded by the FastAPI app at runtime; `VITE_API_BASE_URL` is only used by
+Docker Compose to pass a **build arg** to the frontend image (Vite bakes it into the built JS at
+build time, not runtime) — see [Deploying to EC2](#deploying-to-ec2) for the deployed values.
 
 ---
 
@@ -154,18 +161,25 @@ The API will start at `http://localhost:8000`. The database tables and seed data
 
 ## Running with Docker Compose
 
-Requires Docker Desktop.
+Requires Docker Desktop. This starts all three services — the API, PostgreSQL, **and** the built
+React frontend served by Nginx:
 
 ```bash
-# Build and start the API + PostgreSQL database
 docker compose up --build
 ```
 
-| Service | Port |
-|---|---|
-| FastAPI API | `http://localhost:8000` |
-| Swagger UI | `http://localhost:8000/docs` |
-| PostgreSQL | `localhost:5432` |
+| Service | Container | Port |
+|---|---|---|
+| Frontend (React, built + served by Nginx) | `frontend` | `http://localhost` (port 80) |
+| FastAPI API | `api` | `http://localhost:8000` |
+| Swagger UI | `api` | `http://localhost:8000/docs` |
+| PostgreSQL | `db` | `localhost:5432` |
+
+Verify all three are up:
+
+```bash
+docker ps   # should list db, api, frontend
+```
 
 To stop and remove all containers and data:
 
@@ -173,12 +187,19 @@ To stop and remove all containers and data:
 docker compose down -v
 ```
 
+**The frontend's API base URL is baked in at image build time** (Vite requirement — it can't be a
+runtime env var), via the `VITE_API_BASE_URL` build arg sourced from the root `.env`. It defaults to
+`http://localhost:8000`, which is correct for running everything on one machine. See
+[Deploying to EC2](#deploying-to-ec2) below for a multi-host deployment.
+
 ---
 
-## Running the Frontend
+## Running the Frontend in Dev Mode
 
-A React (Vite) frontend lives in [`frontend/`](frontend/) — see [FRONTEND_STATUS.md](FRONTEND_STATUS.md)
-for full details (pages, components, API map, demo flow).
+For frontend development with hot reload, run it outside Docker against the Dockerized backend
+(`docker compose up --build db api` for just the backend, or run all three — the standalone dev
+server on 5173 doesn't conflict with the Nginx one on port 80). See
+[FRONTEND_STATUS.md](FRONTEND_STATUS.md) for full details (pages, components, API map, demo flow).
 
 ```bash
 cd frontend
@@ -187,10 +208,37 @@ cp .env.example .env   # VITE_API_BASE_URL=http://localhost:8000
 npm run dev
 ```
 
-Open `http://localhost:5173`. The backend (via Docker Compose above) must be running and must allow
-the frontend's origin in CORS — it does by default (`CORS_ORIGINS=http://localhost:5173` in `.env`).
-To point the frontend at a deployed backend (e.g. EC2), set `VITE_API_BASE_URL=http://EC2_PUBLIC_IP:8000`
-in `frontend/.env` and add that frontend's origin to the backend's `CORS_ORIGINS`.
+Open `http://localhost:5173`. The backend must allow this origin in CORS — it does by default
+(`CORS_ORIGINS` in the root `.env` includes `http://localhost:5173`).
+
+---
+
+## Deploying to EC2
+
+Both frontend and backend run from the same `docker-compose.yml` on one EC2 instance. Before
+building, edit the root `.env` on the EC2 host:
+
+```env
+# Backend must allow the deployed frontend's origin(s).
+# Port 80 is omitted from the browser's Origin header when serving on the default HTTP port,
+# but the :80 form is included too in case the frontend is ever mapped to a non-default port.
+CORS_ORIGINS=http://localhost:5173,http://localhost,http://EC2_PUBLIC_IP,http://EC2_PUBLIC_IP:80
+
+# Baked into the frontend's built JS — must point at the backend's public address.
+VITE_API_BASE_URL=http://EC2_PUBLIC_IP:8000
+```
+
+Replace `EC2_PUBLIC_IP` with the instance's actual public IP (or domain), then build:
+
+```bash
+docker compose up --build -d
+docker ps   # confirm db, api, frontend are all running
+```
+
+Open `http://EC2_PUBLIC_IP` (port 80) for the app and `http://EC2_PUBLIC_IP:8000/docs` for Swagger.
+Make sure the EC2 security group allows inbound traffic on ports 80 and 8000. If `VITE_API_BASE_URL`
+or `CORS_ORIGINS` change later, rebuild with `docker compose up --build -d` again — both are baked
+in / read at container start, not hot-reloaded.
 
 ---
 
@@ -294,7 +342,11 @@ frontend/                # React (Vite) client — see FRONTEND_STATUS.md for de
 │   ├── context/          # AuthContext (JWT in localStorage)
 │   ├── pages/            # LoginPage, ProviderListPage, ProviderDetailPage, MatchPage, ...
 │   └── App.jsx, main.jsx, styles.css
-└── .env.example          # VITE_API_BASE_URL
+├── Dockerfile             # multi-stage: npm build -> served by Nginx (production/EC2)
+├── nginx.conf             # SPA fallback (try_files ... /index.html) for React Router
+└── .env.example           # VITE_API_BASE_URL (used by `npm run dev`, not the Docker build)
+
+docker-compose.yml         # db + api + frontend (frontend build arg: VITE_API_BASE_URL)
 ```
 
 ---

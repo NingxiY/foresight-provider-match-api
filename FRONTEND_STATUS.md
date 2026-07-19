@@ -1,6 +1,6 @@
 # Frontend Status
 
-_Last updated: 2026-07-19 (added appointment confirmation page)_
+_Last updated: 2026-07-19 (added frontend Docker/Nginx deployment + EC2 full-stack Compose)_
 
 ## 1. Frontend Overview
 
@@ -50,7 +50,7 @@ have been a thin wrapper with no reuse benefit.
 | Submit match preferences | `POST /provider-matches/` |
 | Book a slot | `POST /appointment-requests/` (`{provider_id, slot_id, reason}`) |
 | View own requests | `GET /appointment-requests/me` |
-| Admin: view all requests | `GET /appointment-requests/` (**new**, admin-only — see §9) |
+| Admin: view all requests | `GET /appointment-requests/` (**new**, admin-only — see §10) |
 | Admin: update status | `PATCH /appointment-requests/{id}/status` |
 
 All calls use the exact trailing-slash canonical paths the backend routers define (`/providers/`,
@@ -103,29 +103,53 @@ behavior.
 
 ## 8. How to Run Locally
 
-```bash
-# Backend (from repo root)
-docker compose up --build -d
+**Option A — full stack via Docker Compose** (matches production/EC2 exactly: Nginx serving the
+built app on port 80):
 
-# Frontend (separate terminal)
+```bash
+docker compose up --build -d
+docker ps   # db, api, frontend
+```
+
+Open `http://localhost` (port 80).
+
+**Option B — frontend dev mode** (hot reload, for active frontend development):
+
+```bash
+docker compose up --build db api -d   # backend only
 cd frontend
 npm install
 cp .env.example .env   # VITE_API_BASE_URL=http://localhost:8000
 npm run dev
 ```
 
-Open `http://localhost:5173`. The backend must be reachable at `VITE_API_BASE_URL` and must allow
-`http://localhost:5173` in its CORS origins (it does by default — see §9).
+Open `http://localhost:5173`. Either way, the backend must allow the frontend's origin in CORS — the
+root `.env`'s `CORS_ORIGINS` includes both `http://localhost:5173` and `http://localhost` by default.
 
-## 9. Pointing the Frontend at an EC2 Backend
+## 9. Production Build & EC2 Deployment
 
-1. On the EC2 host, set `CORS_ORIGINS` in the backend's `.env` to include the deployed frontend's
-   origin, e.g. `CORS_ORIGINS=http://localhost:5173,http://<frontend-host>` (comma-separated), and
-   restart the backend container.
-2. In `frontend/.env`, set `VITE_API_BASE_URL=http://<EC2_PUBLIC_IP>:8000`.
-3. Rebuild/restart the frontend (`npm run dev` or `npm run build` + serve `dist/`).
+The frontend now has its own `frontend/Dockerfile`: a multi-stage build that runs `npm run build`
+in a Node image, then copies the resulting `dist/` into an `nginx:alpine` image (`frontend/nginx.conf`
+adds the SPA fallback `try_files $uri $uri/ /index.html`, so client-side routes like
+`/appointment-confirmation/3` work on refresh/direct access, not just on in-app navigation).
+`docker-compose.yml` builds and runs this as the `frontend` service (port 80), alongside `api` and `db`.
 
-No code changes are required for either step — both are environment variables.
+**Important Vite constraint:** `VITE_API_BASE_URL` is compiled into the built JS at *image build
+time* — it cannot be changed by setting a container env var at runtime like a normal backend
+setting. It's passed as a Docker Compose **build arg**, sourced from the root `.env`.
+
+To deploy both frontend and backend together on one EC2 instance, edit the root `.env` on the host
+before building:
+
+```env
+VITE_API_BASE_URL=http://EC2_PUBLIC_IP:8000
+CORS_ORIGINS=http://localhost:5173,http://localhost,http://EC2_PUBLIC_IP,http://EC2_PUBLIC_IP:80
+```
+
+then `docker compose up --build -d`. See the README's [Deploying to EC2](README.md#deploying-to-ec2)
+section for the full walkthrough (security group ports, verification steps). If either value changes
+later, it requires a rebuild (`--build`), not just a restart — one is baked into the JS bundle, the
+other is only read at container start.
 
 ## 10. Backend Changes Made to Support the Frontend
 
@@ -138,8 +162,15 @@ Kept intentionally minimal, per the "don't rewrite the backend" constraint:
   discover *which* request IDs exist to `PATCH` their status, so the Admin page had nothing to
   manage. This is a purely additive, admin-gated endpoint reusing the existing
   `AppointmentRequestOut` schema — it does not change any existing contract.
+- **`Settings` now ignores unrecognized env vars** (`app/config.py`, `extra = "ignore"`) — needed
+  once `VITE_API_BASE_URL` was added to the shared root `.env` for the Compose frontend build arg.
+  Without this, `api` failed to start: pydantic's `Settings` rejects any env var it doesn't declare
+  by default, and `api`'s `env_file: .env` loads every var in that file into its environment,
+  `VITE_API_BASE_URL` included. This was caught by actually running `docker compose up --build`
+  and watching the `api` container exit — `docker ps` silently omitting `api` (instead of showing
+  it as failed/restarting) was the first sign something was wrong.
 
-No other endpoint request/response shapes changed.
+No endpoint request/response shapes changed.
 
 ## 11. Appointment Confirmation Page
 
@@ -179,3 +210,7 @@ those real routes rather than introducing duplicate/renamed routes for no functi
 - No dark mode / theming — single light healthcare-style palette (muted teal/green, generous
   whitespace), loosely inspired by real provider-matching sites' warm-but-professional tone, not a
   copy of any specific site's branding or components.
+- `VITE_API_BASE_URL` is baked in at build time, not a runtime setting — pointing an already-built
+  frontend image at a different backend requires a full `docker compose up --build`, not just an env
+  var change or container restart. Fine for a single-EC2-instance class demo; a production setup
+  would more likely serve the app behind a reverse proxy and use relative API paths instead.

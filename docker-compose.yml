@@ -30,5 +30,19 @@ services:
       timeout: 5s
       retries: 5
 
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the built JS at image-build time (Vite requirement, not
+        # a runtime env var). Defaults to localhost for local dev; set
+        # VITE_API_BASE_URL in the root .env to the EC2 public IP for a
+        # deployed build, e.g. http://EC2_PUBLIC_IP:8000.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+
 volumes:
   postgres_data:
