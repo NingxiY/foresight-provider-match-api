@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app import models, schemas
 from app.deps import get_db, get_current_user
+from app.routers.providers import next_available_slot
 
 router = APIRouter(prefix="/provider-matches", tags=["Provider Matches"])
 
@@ -59,7 +60,20 @@ def request_match(
         concern=match_request.concern,
         preferred_day=match_request.preferred_day,
         matched_providers=[
-            schemas.ProviderScore(provider=schemas.ProviderOut.model_validate(p), score=s)
+            schemas.ProviderScore(
+                provider=schemas.ProviderSummary(
+                    id=p.id,
+                    full_name=p.full_name,
+                    specialty=p.specialty,
+                    state=p.state,
+                    accepting_new_patients=p.accepting_new_patients,
+                    headline=schemas.provider_headline(p.bio),
+                    next_available_slot=(
+                        slot.start_time if (slot := next_available_slot(db, p.id)) else None
+                    ),
+                ),
+                score=s,
+            )
             for p, s in matched
         ],
     )

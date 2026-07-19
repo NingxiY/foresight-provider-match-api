@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Enum, DateTime, Text, Boolean
+from sqlalchemy import Column, Integer, String, ForeignKey, Enum, DateTime, Text, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
@@ -40,13 +40,29 @@ class Provider(Base):
     state = Column(String, nullable=False)
     location = Column(String, nullable=False)
     accepted_insurance = Column(String)
-    available_days = Column(String)          # e.g. "Monday,Wednesday,Friday"
+    available_days = Column(String)          # e.g. "Monday,Wednesday,Friday" (legacy, informational only)
     accepting_new_patients = Column(Boolean, default=True, nullable=False)
     languages = Column(String)
     bio = Column(Text)
+    years_experience = Column(Integer)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     appointment_requests = relationship("AppointmentRequest", back_populates="provider")
+    slots = relationship("AppointmentSlot", back_populates="provider")
+
+
+class AppointmentSlot(Base):
+    __tablename__ = "appointment_slots"
+    __table_args__ = (UniqueConstraint("provider_id", "start_time", name="uq_slot_provider_start"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    provider_id = Column(Integer, ForeignKey("providers.id"), nullable=False)
+    start_time = Column(DateTime(timezone=True), nullable=False)
+    end_time = Column(DateTime(timezone=True), nullable=False)
+    is_available = Column(Boolean, default=True, nullable=False)
+
+    provider = relationship("Provider", back_populates="slots")
+    appointment_request = relationship("AppointmentRequest", back_populates="slot", uselist=False)
 
 
 class ProviderMatchRequest(Base):
@@ -69,7 +85,7 @@ class AppointmentRequest(Base):
     id = Column(Integer, primary_key=True, index=True)
     patient_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     provider_id = Column(Integer, ForeignKey("providers.id"), nullable=False)
-    preferred_date = Column(String)
+    slot_id = Column(Integer, ForeignKey("appointment_slots.id"), nullable=True, unique=True)
     reason = Column(Text)
     status = Column(Enum(AppointmentStatus), default=AppointmentStatus.pending, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -77,3 +93,4 @@ class AppointmentRequest(Base):
 
     patient = relationship("User", back_populates="appointment_requests")
     provider = relationship("Provider", back_populates="appointment_requests")
+    slot = relationship("AppointmentSlot", back_populates="appointment_request")

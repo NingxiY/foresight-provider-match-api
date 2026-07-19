@@ -53,9 +53,10 @@ Patients can find providers suited to their needs, request appointments, and tra
 | Model | Table | Purpose |
 |---|---|---|
 | `User` | `users` | Registered users with a `patient` or `admin` role. Stores hashed password and profile. |
-| `Provider` | `providers` | Mental health providers with specialty, state, insurance accepted, available days, and whether they are accepting new patients. |
+| `Provider` | `providers` | Mental health providers with specialty, state, insurance accepted, years of experience, languages, and whether they are accepting new patients. |
+| `AppointmentSlot` | `appointment_slots` | A concrete bookable time slot for a provider (`start_time`, `end_time`, `is_available`). This is the source of truth for real availability. |
 | `ProviderMatchRequest` | `provider_match_requests` | A patient's submitted matching preferences (state, insurance, concern, preferred day). Linked to the patient user. |
-| `AppointmentRequest` | `appointment_requests` | A patient's appointment request for a specific provider, with a preferred date, reason, and status (pending → approved/declined/cancelled). |
+| `AppointmentRequest` | `appointment_requests` | A patient's appointment request for a specific provider **and slot**, with a reason and status (pending → approved/declined/cancelled). `slot_id` is unique at the DB level so the same slot can never be double-booked, even under concurrent requests. |
 
 ---
 
@@ -66,11 +67,12 @@ Patients can find providers suited to their needs, request appointments, and tra
 | `POST` | `/auth/register` | No | Create a new patient (or admin) account |
 | `POST` | `/auth/login` | No | Log in and receive a JWT access token |
 | `GET` | `/auth/me` | Bearer | Return the currently authenticated user's profile |
-| `GET` | `/providers` | No | List all providers; supports `?state=`, `?insurance=`, `?specialty=`, `?accepting_new_patients=` filters |
-| `GET` | `/providers/{id}` | No | Get a single provider's detail; returns 404 if not found |
-| `POST` | `/provider-matches` | Bearer | Submit match preferences; returns providers ranked by rule-based score |
-| `POST` | `/appointment-requests` | Bearer | Create an appointment request for a provider; returns 404 if provider not found |
+| `GET` | `/providers` | No | List providers as lightweight **summary** cards (id, name, specialty, state, accepting_new_patients, headline, next_available_slot); supports `?state=`, `?insurance=`, `?specialty=`, `?accepting_new_patients=` filters |
+| `GET` | `/providers/{id}` | No | Get a provider's full **detail** (bio, insurance, languages, years of experience, and all upcoming available slots); returns 404 if not found |
+| `POST` | `/provider-matches` | Bearer | Submit match preferences; returns providers (summary form) ranked by rule-based score |
+| `POST` | `/appointment-requests` | Bearer | Book a specific `slot_id` for a `provider_id`; returns 404 if the provider or slot doesn't exist, 409 if the slot is already booked |
 | `GET` | `/appointment-requests/me` | Bearer | Return only the current user's appointment requests |
+| `GET` | `/appointment-requests` | Bearer (admin only) | List **all** appointment requests, across all patients (added to support the admin frontend page) |
 | `PATCH` | `/appointment-requests/{id}/status` | Bearer (admin only) | Update appointment status; returns 403 if caller is not admin |
 | `DELETE` | `/appointment-requests/{id}` | Bearer | Patient cancels their own request (403 for others); admin can delete any |
 | `GET` | `/health` | No | Health check — returns `{"status": "ok"}` |
@@ -173,6 +175,25 @@ docker compose down -v
 
 ---
 
+## Running the Frontend
+
+A React (Vite) frontend lives in [`frontend/`](frontend/) — see [FRONTEND_STATUS.md](FRONTEND_STATUS.md)
+for full details (pages, components, API map, demo flow).
+
+```bash
+cd frontend
+npm install
+cp .env.example .env   # VITE_API_BASE_URL=http://localhost:8000
+npm run dev
+```
+
+Open `http://localhost:5173`. The backend (via Docker Compose above) must be running and must allow
+the frontend's origin in CORS — it does by default (`CORS_ORIGINS=http://localhost:5173` in `.env`).
+To point the frontend at a deployed backend (e.g. EC2), set `VITE_API_BASE_URL=http://EC2_PUBLIC_IP:8000`
+in `frontend/.env` and add that frontend's origin to the backend's `CORS_ORIGINS`.
+
+---
+
 ## Demo Credentials
 
 These accounts are seeded automatically on first startup.
@@ -190,10 +211,10 @@ Open `http://localhost:8000/docs` and follow these steps:
 
 ### Step 1 — Browse providers (no login needed)
 
-- `GET /providers` — see all 8 seeded providers
+- `GET /providers` — see all 8 seeded providers as lightweight summary cards (name, specialty, state, headline, next available slot — no bio/insurance/full slot list)
 - `GET /providers?state=NY` — filter to New York providers
 - `GET /providers?insurance=Aetna&accepting_new_patients=true` — combine filters
-- `GET /providers/1` — view Dr. Alice Kim's full profile
+- `GET /providers/1` — view Dr. Alice Kim's full profile, including bio, insurance, languages, years of experience, and every upcoming available slot with its `id`
 
 ### Step 2 — Register and log in
 
@@ -217,28 +238,33 @@ Open `http://localhost:8000/docs` and follow these steps:
 
 ### Step 4 — Request an appointment
 
+- `GET /providers/1` — copy the `id` of one of the `available_slots` (e.g. the first one)
 - `POST /appointment-requests` with:
   ```json
   {
     "provider_id": 1,
-    "preferred_date": "2026-08-01",
+    "slot_id": 1,
     "reason": "Anxiety management support"
   }
   ```
-- `GET /appointment-requests/me` — confirm the request appears with status `pending`
+- `GET /appointment-requests/me` — confirm the request appears with status `pending` and the booked slot
+- `GET /providers/1` again — the booked slot no longer appears in `available_slots`
+- Repeat the same `POST /appointment-requests` call with the same `slot_id` — observe `409 Conflict`, `"This appointment slot has already been booked."`
+- Try `POST /appointment-requests` with a `slot_id` that doesn't exist — observe `404 Not Found`
 
 ### Step 5 — Admin approves the request
 
 - Log out of the patient account (click Authorize → Logout)
 - `POST /auth/login` as `admin@foresight.com` / `admin123`
 - Authorize with the admin token
-- `PATCH /appointment-requests/1/status` with `{"status": "approved"}`
+- `PATCH /appointment-requests/1/status` with `{"status": "approved"}` — the slot stays booked
 - Try the same PATCH as a patient — observe the `403 Forbidden` response
+- Book a second slot as the patient, then `PATCH` it to `{"status": "declined"}` as admin — `GET /providers/1` shows that slot as available again, since a declined/cancelled request releases its slot
 
 ### Step 6 — Cancel and delete
 
 - Log back in as the patient
-- `DELETE /appointment-requests/1` — patient cancels their own request (204)
+- `DELETE /appointment-requests/1` — patient cancels their own request (204); its slot is released back to `available_slots` too
 - Try to delete a request belonging to another user — observe `403 Forbidden`
 
 ---
@@ -250,16 +276,25 @@ app/
 ├── main.py          # FastAPI app, lifespan (create_all + seed)
 ├── config.py        # Settings loaded from .env
 ├── database.py      # SQLAlchemy engine and session
-├── models.py        # ORM models: User, Provider, ProviderMatchRequest, AppointmentRequest
-├── schemas.py       # Pydantic request/response schemas
+├── models.py        # ORM models: User, Provider, AppointmentSlot, ProviderMatchRequest, AppointmentRequest
+├── schemas.py       # Pydantic request/response schemas (ProviderSummary/ProviderDetail split, AppointmentSlotOut)
 ├── auth.py          # Password hashing (bcrypt) and JWT creation/decoding
 ├── deps.py          # FastAPI dependencies: get_db, get_current_user, require_admin
-├── seed.py          # Demo data seeded on first startup
+├── seed.py          # Demo data seeded on first startup, including appointment slots
 └── routers/
     ├── auth.py          # /auth/register, /auth/login, /auth/me
-    ├── providers.py     # /providers, /providers/{id}
+    ├── providers.py     # /providers (summary), /providers/{id} (detail)
     ├── matches.py       # /provider-matches
-    └── appointments.py  # /appointment-requests (CRUD + status)
+    └── appointments.py  # /appointment-requests (slot-based booking, CRUD + status)
+
+frontend/                # React (Vite) client — see FRONTEND_STATUS.md for details
+├── src/
+│   ├── api/             # axios client + one module per resource
+│   ├── components/      # Navbar, ProviderCard, AppointmentSlotPicker, route guards, etc.
+│   ├── context/          # AuthContext (JWT in localStorage)
+│   ├── pages/            # LoginPage, ProviderListPage, ProviderDetailPage, MatchPage, ...
+│   └── App.jsx, main.jsx, styles.css
+└── .env.example          # VITE_API_BASE_URL
 ```
 
 ---
@@ -269,8 +304,9 @@ app/
 | Area | Improvement |
 |---|---|
 | **Matching algorithm** | Weight by patient rating history, provider response rate, and distance (geocoding) rather than simple keyword matching |
-| **Real availability** | Replace the `available_days` string with a structured availability calendar; check for existing appointments before accepting new ones |
+| **Recurring availability** | Add a recurring-schedule generator (e.g. "every Monday 9-5") that produces `AppointmentSlot` rows automatically instead of seeding fixed dates |
 | **HIPAA / privacy** | Encrypt PII at rest, enforce field-level access control, add audit logging for all record access and mutations |
 | **Notifications** | Send email or SMS confirmation when an appointment is approved or declined (e.g. via SendGrid or Twilio) |
 | **Provider portal** | Allow providers to manage their own availability, accept/decline directly, and view their schedule |
 | **Pagination** | Add `limit`/`offset` query params to `/providers` and `/appointment-requests/me` for production-scale data |
+| **Migrations** | Introduce Alembic once the schema needs to evolve against real (non-disposable) data; today `Base.metadata.create_all` is sufficient since the dev DB is recreated on `docker compose down -v` |

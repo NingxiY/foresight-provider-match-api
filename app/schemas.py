@@ -33,8 +33,43 @@ class TokenData(BaseModel):
     user_id: Optional[int] = None
 
 
+# --- Appointment Slot ---
+class AppointmentSlotOut(BaseModel):
+    id: int
+    provider_id: int
+    start_time: datetime
+    end_time: datetime
+    is_available: bool
+
+    class Config:
+        from_attributes = True
+
+
 # --- Provider ---
-class ProviderOut(BaseModel):
+def provider_headline(bio: Optional[str]) -> Optional[str]:
+    if not bio:
+        return None
+    return bio if len(bio) <= 80 else bio[:77].rstrip() + "..."
+
+
+class ProviderSummary(BaseModel):
+    """Lightweight provider info for list/search results (mirrors a provider search results page)."""
+
+    id: int
+    full_name: str
+    specialty: str
+    state: str
+    accepting_new_patients: bool
+    headline: Optional[str] = None
+    next_available_slot: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ProviderDetail(BaseModel):
+    """Full provider info for a provider detail page."""
+
     id: int
     full_name: str
     specialty: str
@@ -45,7 +80,9 @@ class ProviderOut(BaseModel):
     accepting_new_patients: bool
     languages: Optional[str]
     bio: Optional[str]
+    years_experience: Optional[int]
     created_at: datetime
+    available_slots: list[AppointmentSlotOut] = []
 
     class Config:
         from_attributes = True
@@ -60,7 +97,7 @@ class ProviderMatchCreate(BaseModel):
 
 
 class ProviderScore(BaseModel):
-    provider: ProviderOut
+    provider: ProviderSummary
     score: int
 
 
@@ -80,7 +117,7 @@ class ProviderMatchOut(BaseModel):
 # --- Appointment Request ---
 class AppointmentRequestCreate(BaseModel):
     provider_id: int
-    preferred_date: Optional[str] = None
+    slot_id: int
     reason: Optional[str] = None
 
 
@@ -92,7 +129,7 @@ class AppointmentRequestOut(BaseModel):
     id: int
     patient_id: int
     provider_id: int
-    preferred_date: Optional[str]
+    slot: Optional[AppointmentSlotOut] = None
     reason: Optional[str]
     status: AppointmentStatus
     created_at: datetime
